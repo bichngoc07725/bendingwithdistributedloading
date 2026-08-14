@@ -1,0 +1,11 @@
+.venv/
+.matplotlib/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local tool runtime state, not project source.
+.claude/
+
+# Unpublished multi-author manuscript draft -- not for public push.
+/paper/

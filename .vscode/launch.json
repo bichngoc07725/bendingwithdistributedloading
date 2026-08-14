@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PINN: calibrate all data (adaptive 2/4 points)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/bending_with_distributed_loading.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--case",
+        "all",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ]
+    },
+    {
+      "name": "PINN: predict d=140 mm (no data)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/bending_with_distributed_loading.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--distance-mm",
+        "140",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ]
+    }
+  ]
+}

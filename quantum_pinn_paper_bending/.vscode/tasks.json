@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Create Quantum-PINN environment",
+      "type": "process",
+      "command": "python3",
+      "args": ["-m", "venv", "--system-site-packages", ".venv"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Install Quantum-PINN dependencies",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "pip", "install", "-r", "${workspaceFolder}/requirements.txt"],
+      "dependsOn": "Create Quantum-PINN environment",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run QPINN: d=190 mm",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["${workspaceFolder}/quantum_pinn_bending.py", "--case", "190"],
+      "dependsOn": "Install Quantum-PINN dependencies",
+      "dependsOrder": "sequence",
+      "group": {"kind": "build", "isDefault": true},
+      "problemMatcher": []
+    },
+    {
+      "label": "Run QPINN: d=75 mm (tight loop)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["${workspaceFolder}/quantum_pinn_bending.py", "--case", "75", "--data-points", "4", "--epochs", "3000"],
+      "dependsOn": "Install Quantum-PINN dependencies",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}

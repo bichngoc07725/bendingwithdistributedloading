@@ -1,0 +1,65 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Create Python environment",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "-m",
+        "venv",
+        ".venv"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Install dependencies",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "${workspaceFolder}/requirements.txt"
+      ],
+      "dependsOn": "Create Python environment",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: calibrate all data (adaptive 2/4 points)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/bending_with_distributed_loading.py",
+        "--case",
+        "all",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ],
+      "dependsOn": "Install dependencies",
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: predict d=140 mm (no data)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/bending_with_distributed_loading.py",
+        "--distance-mm",
+        "140",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ],
+      "dependsOn": "Install dependencies",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    }
+  ]
+}
