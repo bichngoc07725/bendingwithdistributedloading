@@ -2,6 +2,8 @@
 
 This project rewrites `bending_with_distributed_loading.py` as an executable PyTorch PINN. It implements the large-deflection model in *Paper shape*, not a small-deflection beam approximation.
 
+The six measured input datasets are stored as CSV files in `data/`. Generated CSV files remain under `results/` with their corresponding figures and summaries.
+
 ## Open and run with VS Code
 
 1. Open `paper-bending-pinn.code-workspace` in VS Code and install the suggested **Python** extension if VS Code requests it.
@@ -138,7 +140,7 @@ more important than PINN-to-projection consistency.
 - Replaced per-layer `F`/`Q` values and their arbitrary average with global physical reaction-force parameters.
 - Preserved the elastica ODE while enforcing all four position boundary conditions exactly; the old code rescaled the predicted curve after solving, which breaks the inextensibility/ODE relation.
 - Avoids fitting finite-difference angles, which amplify pixel noise. The network learns the smooth tangent angle and coordinate curve together from the governing equations.
-- Reads both provided CSV and XLSX files without notebook-only dependencies, aligns each photo to its known chord, and samples sparse observations by arc length.
+- Reads the supplied CSV files without notebook-only dependencies, aligns each photo to its known chord, and samples sparse observations by arc length.
 
 ## Limits
 

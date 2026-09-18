@@ -129,12 +129,12 @@ class PaperProperties:
 # End distances declared by the data-file names.  We do not infer d from a
 # noisy photograph because d is the input/control variable of the problem.
 EXPERIMENTS = {
-    75: "d=75mm.xlsx",
-    115: "d=115mm.xlsx",
-    150: "d=150mm.csv",
-    170: "d=170mm.xlsx",
-    190: "d=190mm.csv",
-    210: "d=210mm.csv",
+    75: "data/d=75mm.csv",
+    115: "data/d=115mm.csv",
+    150: "data/d=150mm.csv",
+    170: "data/d=170mm.csv",
+    190: "data/d=190mm.csv",
+    210: "data/d=210mm.csv",
 }
 
 
