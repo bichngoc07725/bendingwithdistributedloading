@@ -9,6 +9,7 @@ __pycache__/
 
 # Keep only the curated top-level results/ tree in version control.
 /results_150_refined/
+/results_unified/
 /results_experiment_150mm/
 /results_interpolated/
 /results_numerical_validation/

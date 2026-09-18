@@ -10,11 +10,14 @@ instead uses an adaptive sparse calibration set: two uniformly spaced,
 *interior* measurements, or four for the two tightly folded cases where two
 points cannot select the correct elastica branch.  The endpoint measurements
 are never used as training data because they are hard boundary conditions.
+The default preset matches the curated results/: d=150 mm uses physics and
+closure weights 100/100, while the other cases use 1/0. Explicit CLI weights
+override these defaults. The five ablations retain their original 1/0 weights.
 
 Examples
 --------
-# Predict every supplied experiment using d only
-python3 bending_with_distributed_loading.py --case all --data-points 0
+# Reproduce every curated case and compare against the saved numerical results
+python3 bending_with_distributed_loading.py --case all --verify-results
 
 # Calibrate a tightly folded 115 mm experiment with 4 sparse internal points
 python3 bending_with_distributed_loading.py --case 115 --support calibrated --data-points 4
@@ -22,7 +25,7 @@ python3 bending_with_distributed_loading.py --case 115 --support calibrated --da
 # Predict a new configuration from a known distance, without any image data
 python3 bending_with_distributed_loading.py --distance-mm 140
 
-Dependencies: Python 3, numpy, torch and matplotlib.  No TensorFlow, pandas,
+Dependencies: Python 3, numpy, torch, scipy and matplotlib. No TensorFlow, pandas,
 Colab, or Google Drive is required.
 """
 
@@ -33,6 +36,7 @@ import csv
 import json
 import math
 import os
+import platform
 import re
 import tempfile
 import zipfile
@@ -52,6 +56,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from importlib.metadata import version
 from scipy.integrate import solve_bvp
 from torch import nn
 
@@ -332,6 +337,73 @@ class PaperPINN(nn.Module):
         return x, y, theta, contact_pressure
 
 
+class FreeYPaperPINN(PaperPINN):
+    """PaperPINN without the unilateral ground constraint.
+
+    y is left unconstrained (may go negative) and the contact-pressure DOF
+    is pinned at zero, which also zeroes physics_loss's contact-resultant
+    and complementarity terms -- i.e. the plain pre-ground-constraint ODE.
+    """
+
+    def forward(self, xi: torch.Tensor):
+        output = self.network(2.0 * xi - 1.0)
+        bubble = xi * (1.0 - xi)
+        x = self.distance_ratio * xi + bubble * output[:, 0:1]
+        y = bubble * output[:, 1:2]
+        if self.support == "pinned":
+            h_left = 2.0 * xi**3 - 3.0 * xi**2 + 1.0
+            h_right = 1.0 - h_left
+            theta_bubble = xi**2 * (1.0 - xi) ** 2
+            theta = (
+                self.theta_left * h_left
+                + self.theta_right * h_right
+                + theta_bubble * output[:, 2:3]
+            )
+        else:
+            theta = (
+                self.theta_left * (1.0 - xi)
+                + self.theta_right * xi
+                + bubble * output[:, 2:3]
+            )
+        contact_pressure = torch.zeros_like(output[:, 3:4])
+        return x, y, theta, contact_pressure
+
+
+def select_curvature_weighted_observations(
+    points: np.ndarray, arclength: np.ndarray, number: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Interior points concentrated where the measured curve turns sharply.
+
+    Builds a cumulative weight that is mostly the local turning-angle
+    magnitude (curvature proxy) plus a small floor so straight stretches
+    still get baseline coverage, then samples evenly in that weighted
+    measure instead of raw arc length.
+    """
+
+    if number == 0:
+        return np.empty((0, 1)), np.empty((0, 2))
+    if number < 0 or number > len(points) - 2:
+        raise ValueError("Requested count must be between 0 and the available interior points.")
+    tangents = np.diff(points, axis=0)
+    angles = np.unwrap(np.arctan2(tangents[:, 1], tangents[:, 0]))
+    turning = np.abs(np.diff(angles))
+    curvature = np.concatenate(([0.0], turning, [0.0]))
+    weight = curvature + 0.15 * curvature.mean() + 1.0e-9
+    panel = 0.5 * (weight[:-1] + weight[1:])
+    cumulative = np.concatenate(([0.0], np.cumsum(panel)))
+    cumulative /= cumulative[-1]
+    targets = np.linspace(0.0, 1.0, number + 2)[1:-1]
+    available = list(range(1, len(points) - 1))
+    selected = []
+    for target in targets:
+        index = min(available, key=lambda i: abs(cumulative[i] - target))
+        selected.append(index)
+        available.remove(index)
+    chosen = np.array(sorted(selected), dtype=int)
+    return arclength[chosen, None], points[chosen]
+
+
+
 def derivative(value: torch.Tensor, coordinate: torch.Tensor) -> torch.Tensor:
     return torch.autograd.grad(
         value,
@@ -574,6 +646,7 @@ def plot_shape(
     sparse_xy: np.ndarray,
     rmse_m: Optional[float] = None,
     r2_y: Optional[float] = None,
+    reference_label: str = "Numerical PDE solution",
 ) -> None:
     """Render one comparison with the same canvas, scale and visual style."""
 
@@ -583,7 +656,7 @@ def plot_shape(
         reference[:, 1],
         color="tab:red",
         lw=2.2,
-        label="Numerical PDE solution",
+        label=reference_label,
         zorder=2,
     )
     axis.plot(
@@ -638,6 +711,7 @@ def write_outputs(
     support: str,
     rmse_m: Optional[float] = None,
     r2_y: Optional[float] = None,
+    reference_label: str = "Numerical PDE solution",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / f"shape_{label}.csv"
@@ -654,6 +728,7 @@ def write_outputs(
         sparse_xy,
         rmse_m=rmse_m,
         r2_y=r2_y,
+        reference_label=reference_label,
     )
 
 
@@ -665,8 +740,9 @@ def replot_saved_outputs(output_dir: Path) -> None:
         raise FileNotFoundError(f"Missing {summary_path}")
     summary = json.loads(summary_path.read_text())
     length = float(summary["paper_properties"]["length"])
-    bending_stiffness = float(summary["bending_stiffness_Nm2"])
-    gravity_number = float(summary["gravity_number"])
+    properties = PaperProperties(**summary["paper_properties"])
+    bending_stiffness = properties.bending_stiffness
+    gravity_number = properties.gravity_number
     force_scale = length**2 / bending_stiffness
 
     for result in summary["results"]:
@@ -684,7 +760,8 @@ def replot_saved_outputs(output_dir: Path) -> None:
                 for row in rows
             ]
         )
-        reference = numerical_pde_solution(
+        measured_reference = result.get("reference") == "measured"
+        reference = align_to_boundary(read_xy(ROOT / EXPERIMENTS[int(round(distance_mm))]), distance_mm / 1000.0) if measured_reference else numerical_pde_solution(
             float(result["phi_left_rad"]),
             float(result["phi_right_rad"]),
             float(result["F_N"]) * force_scale,
@@ -704,7 +781,8 @@ def replot_saved_outputs(output_dir: Path) -> None:
                 read_xy(ROOT / EXPERIMENTS[experiment_key]), distance_mm / 1000.0
             )
             measured_xi = normalized_arclength(measured)
-            observations_xi, _ = select_sparse_observations(
+            selector = select_curvature_weighted_observations if result.get("sampling") == "curvature" else select_sparse_observations
+            observations_xi, observations_xy = selector(
                 measured, measured_xi, number_of_points
             )
             reference_xi = np.linspace(0.0, 1.0, len(reference))
@@ -715,6 +793,9 @@ def replot_saved_outputs(output_dir: Path) -> None:
                 )
             )
 
+        if measured_reference and number_of_points:
+            sparse_xy = observations_xy
+
         plot_shape(
             output_dir / f"shape_{label}.png",
             label,
@@ -723,6 +804,7 @@ def replot_saved_outputs(output_dir: Path) -> None:
             sparse_xy,
             rmse_m=result.get("rmse_m"),
             r2_y=result.get("r2_y"),
+            reference_label="Measured curve" if measured_reference else "Numerical PDE solution",
         )
         print(f"Replotted {output_dir / f'shape_{label}.png'}")
 
@@ -857,12 +939,30 @@ def plot_six_case_comparison(output_dir: Path) -> None:
     print(f"Wrote {pdf_path}")
 
 
+def resolve_case_arguments(
+    arguments: argparse.Namespace, distance_mm: float, source: Optional[Path]
+) -> argparse.Namespace:
+    """Resolve case defaults without leaking the 150 mm weights to other cases."""
+    config = argparse.Namespace(**vars(arguments))
+    refined = (
+        source is not None
+        and distance_mm == 150.0
+        and not config.experiment_150mm
+    )
+    if config.physics_weight is None:
+        config.physics_weight = 100.0 if refined else 1.0
+    if config.closure_weight is None:
+        config.closure_weight = 100.0 if refined else 0.0
+    return config
+
+
 def run_case(
     distance_mm: float,
     properties: PaperProperties,
     source: Optional[Path],
     arguments: argparse.Namespace,
 ) -> dict[str, float | int | str]:
+    arguments = resolve_case_arguments(arguments, distance_mm, source)
     distance = distance_mm / 1000.0
     if distance > properties.length:
         raise ValueError(f"d={distance_mm:g} mm is greater than L={properties.length * 1000:g} mm.")
@@ -883,9 +983,9 @@ def run_case(
     if source is not None:
         measured = align_to_boundary(read_xy(source), distance)
         arc = normalized_arclength(measured)
-        observations_xi, observations_xy = select_sparse_observations(
-            measured, arc, data_points
-        )
+        selector = (select_curvature_weighted_observations
+                    if arguments.sampling == "curvature" else select_sparse_observations)
+        observations_xi, observations_xy = selector(measured, arc, data_points)
     elif data_points:
         raise ValueError("Sparse data were requested, but no experimental file was supplied.")
 
@@ -894,7 +994,8 @@ def run_case(
     # A case-specific seed gives the same answer when a case is run alone or
     # as part of --case all.
     torch.manual_seed(arguments.seed + int(round(distance_mm)))
-    model = PaperPINN(distance / properties.length, support=support)
+    model_cls = PaperPINN if arguments.ground == "on" else FreeYPaperPINN
+    model = model_cls(distance / properties.length, support=support)
     losses = train(
         model=model,
         properties=properties,
@@ -914,7 +1015,7 @@ def run_case(
     theta_right = float(model.theta_right.detach())
     force_horizontal = float(model.force_horizontal.detach())
     force_vertical = float(model.force_vertical.detach())
-    reference = numerical_pde_solution(
+    reference = measured if arguments.reference == "measured" else numerical_pde_solution(
         theta_left,
         theta_right,
         force_horizontal,
@@ -925,8 +1026,18 @@ def run_case(
         xi_guess=xi,
     )
 
+    if reference is None:
+        raise ValueError("Measured reference requires an experimental case.")
+
     result: dict[str, float | int | str] = {
         "distance_mm": distance_mm,
+        "sampling": arguments.sampling,
+        "ground": arguments.ground,
+        "reference": arguments.reference,
+        "seed": arguments.seed,
+        "adam_epochs": arguments.adam_epochs,
+        "lbfgs_iterations": arguments.lbfgs_iterations,
+        "collocation_points": arguments.collocation_points,
         "training_points": int(len(observations_xi)),
         "F_N": force_horizontal * properties.bending_stiffness / properties.length**2,
         "Q_N": force_vertical * properties.bending_stiffness / properties.length**2,
@@ -941,9 +1052,8 @@ def run_case(
     }
     result.update(evaluate(xi, predicted, reference))
 
-    # Markers should sit on the numerical PDE solution (the ground-truth
-    # curve being checked against), not at the raw photo coordinates the
-    # PINN was fit to -- those hug the PINN curve almost exactly instead.
+    # Retain the saved plots' marker placement on the BVP projection. This
+    # contact-free projection uses fitted PINN parameters, not ground truth.
     reference_xi = np.linspace(0.0, 1.0, len(reference))
     sparse_xy_on_reference = np.column_stack(
         (
@@ -959,16 +1069,118 @@ def run_case(
         predicted,
         reference,
         observations_xi,
-        sparse_xy_on_reference,
+        observations_xy if arguments.reference == "measured" else sparse_xy_on_reference,
         support,
         rmse_m=result.get("rmse_m"),
         r2_y=result.get("r2_y"),
+        reference_label="Measured curve" if arguments.reference == "measured" else "Numerical PDE solution",
     )
     return result
 
 
+def run_experiment_150mm(arguments: argparse.Namespace, properties: PaperProperties) -> None:
+    """Original five ablations, with shared training and per-variant outputs."""
+    variants = (
+        ("uniform_2pt_ground_on", "uniform", 2, "on"),
+        ("curvature_2pt_ground_on", "curvature", 2, "on"),
+        ("curvature_4pt_ground_on", "curvature", 4, "on"),
+        ("uniform_2pt_ground_off", "uniform", 2, "off"),
+        ("curvature_2pt_ground_off", "curvature", 2, "off"),
+    )
+    results = []
+    for label, sampling, count, ground in variants:
+        config = argparse.Namespace(**vars(arguments))
+        config.sampling, config.data_points, config.ground = sampling, count, ground
+        config.support, config.reference = "calibrated", "measured"
+        config.output_dir = arguments.output_dir / label
+        print(f"Training {label}...", flush=True)
+        result = run_case(150.0, properties, ROOT / EXPERIMENTS[150], config)
+        result["variant"] = label
+        result["seed"] = arguments.seed
+        results.append(result)
+        print(f"{label}: measured RMSE={result['rmse_m'] * 1000:.3f} mm", flush=True)
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+        (config.output_dir / "summary.json").write_text(json.dumps({"paper_properties": asdict(properties), "results": [result]}, indent=2))
+    (arguments.output_dir / "summary.json").write_text(json.dumps({
+        "paper_properties": asdict(properties), "reference": "measured",
+        "training": {key: getattr(arguments, key) for key in
+                     ("seed", "adam_epochs", "lbfgs_iterations", "collocation_points")},
+        "results": results,
+    }, indent=2))
+
+
+def verify_saved_results(output_dir: Path) -> dict:
+    """Compare fresh results with the curated CSVs and every saved metric.
+
+    Tolerances cover floating-point roundoff, not a different fitted solution.
+    The reference files are only read here, never used to produce predictions.
+    """
+    baseline_dir = ROOT / "results"
+    baseline = json.loads((baseline_dir / "summary.json").read_text())
+    actual = json.loads((output_dir / "summary.json").read_text())
+    expected_by_distance = {r["distance_mm"]: r for r in baseline["results"]}
+    checks = []
+    for result in actual["results"]:
+        distance = result["distance_mm"]
+        expected = expected_by_distance[distance]
+        filename = f"shape_{distance:g}.csv"
+        reference = np.loadtxt(baseline_dir / filename, delimiter=",", skiprows=1)
+        generated = np.loadtxt(output_dir / filename, delimiter=",", skiprows=1)
+        csv_matches = generated.shape == reference.shape and np.allclose(
+            generated, reference, rtol=1.0e-7, atol=1.0e-9
+        )
+        metric_mismatches = [
+            key for key, value in expected.items()
+            if (not np.isclose(result[key], value, rtol=1.0e-7, atol=1.0e-10)
+                if isinstance(value, (float, int)) else result[key] != value)
+        ]
+        check = {
+            "distance_mm": distance,
+            "passed": bool(csv_matches and not metric_mismatches),
+            "csv_exact": bool(np.array_equal(generated, reference)),
+            "metrics_exact": all(result[key] == value for key, value in expected.items()),
+            "png_bytes_identical": (output_dir / f"shape_{distance:g}.png").read_bytes()
+                == (baseline_dir / f"shape_{distance:g}.png").read_bytes()
+                if (output_dir / f"shape_{distance:g}.png").exists() else None,
+            "max_abs_xy_difference_m": float(np.max(np.abs(generated[:, 1:3] - reference[:, 1:3])))
+                if generated.shape == reference.shape else None,
+            "metric_mismatches": metric_mismatches,
+        }
+        checks.append(check)
+        print(f"Verification d={distance:g} mm: {'PASS' if check['passed'] else 'FAIL'}", flush=True)
+    report = {
+        "reference_directory": str(baseline_dir),
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "numpy": np.__version__,
+            "torch": torch.__version__,
+            "scipy": version("scipy"),
+            "matplotlib": matplotlib.__version__,
+            "torch_threads": torch.get_num_threads(),
+        },
+        "passed": bool(checks) and actual["paper_properties"] == baseline["paper_properties"]
+                  and all(check["passed"] for check in checks),
+        "csv_rtol": 1.0e-7, "csv_atol": 1.0e-9,
+        "metric_rtol": 1.0e-7, "metric_atol": 1.0e-10,
+        "cases": checks,
+    }
+    (output_dir / "verification.json").write_text(json.dumps(report, indent=2))
+    if not report["passed"]:
+        raise RuntimeError(f"Results differ from the curated baseline; see {output_dir / 'verification.json'}")
+    return report
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--experiment-150mm", action="store_true", help="Run all five 150 mm ablations against measurements.")
+    parser.add_argument("--sampling", choices=("uniform", "curvature"), default="uniform")
+    parser.add_argument("--ground", choices=("on", "off"), default="on")
+    parser.add_argument("--reference", choices=("bvp", "measured"), default="bvp")
+    parser.add_argument(
+        "--verify-results", action="store_true",
+        help="Compare generated CSVs and metrics with curated results/; fail on mismatch.",
+    )
     parser.add_argument("--case", choices=("all", *map(str, EXPERIMENTS)), default="all")
     parser.add_argument("--distance-mm", type=float, help="Predict one new distance; no experimental data are used.")
     parser.add_argument(
@@ -981,14 +1193,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--physics-weight",
         type=float,
-        default=1.0,
-        help="Weight of the local ODE/kinematic/contact residual (default: 1).",
+        default=None,
+        help="Local residual weight (default: 100 for the saved 150 mm case, otherwise 1).",
     )
     parser.add_argument(
         "--closure-weight",
         type=float,
-        default=0.0,
-        help="Weight of global tangent-integral endpoint closure (default: 0).",
+        default=None,
+        help="Closure weight (default: 100 for the saved 150 mm case, otherwise 0).",
     )
     parser.add_argument(
         "--support",
@@ -1000,7 +1212,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--lbfgs-iterations", type=int, default=2000)
     parser.add_argument("--collocation-points", type=int, default=160)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "results")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "results_unified")
     parser.add_argument(
         "--replot-only",
         action="store_true",
@@ -1018,6 +1230,20 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
+    if arguments.verify_results:
+        if arguments.experiment_150mm or arguments.distance_mm is not None or arguments.replot_only or arguments.plot_six_cases:
+            raise ValueError("--verify-results requires training one or all of the curated cases.")
+        if arguments.output_dir.resolve() == (ROOT / "results").resolve():
+            raise ValueError("Verification must write to a separate directory, e.g. results_unified.")
+    if arguments.experiment_150mm:
+        if arguments.distance_mm is not None or arguments.case not in ("all", "150") or arguments.replot_only or arguments.plot_six_cases:
+            raise ValueError("--experiment-150mm cannot be combined with another case or plotting mode.")
+        if arguments.support == "pinned" or arguments.data_points is not None or arguments.sampling != "uniform" or arguments.ground != "on":
+            raise ValueError("The experiment fixes support, point counts, sampling and ground per variant.")
+    if arguments.reference == "measured" and arguments.distance_mm is not None:
+        raise ValueError("--reference measured requires a supplied experimental case.")
+    if arguments.adam_epochs < 0 or arguments.lbfgs_iterations < 0 or arguments.collocation_points < 2:
+        raise ValueError("Training iterations must be nonnegative and collocation points >= 2.")
     if arguments.replot_only and arguments.plot_six_cases:
         raise ValueError("Use either --replot-only or --plot-six-cases, not both.")
     if arguments.plot_six_cases:
@@ -1030,9 +1256,9 @@ def main() -> None:
         raise ValueError("Use either --distance-mm or --case, not both.")
     if arguments.data_weight < 0.0:
         raise ValueError("data_weight must be non-negative")
-    if arguments.physics_weight < 0.0:
+    if arguments.physics_weight is not None and arguments.physics_weight < 0.0:
         raise ValueError("physics_weight must be non-negative")
-    if arguments.closure_weight < 0.0:
+    if arguments.closure_weight is not None and arguments.closure_weight < 0.0:
         raise ValueError("closure_weight must be non-negative")
 
     np.random.seed(arguments.seed)
@@ -1042,6 +1268,10 @@ def main() -> None:
         length=arguments.length_mm / 1000.0,
         youngs_modulus_override=arguments.youngs_modulus_pa,
     )
+
+    if arguments.experiment_150mm:
+        run_experiment_150mm(arguments, properties)
+        return
 
     if arguments.distance_mm is not None:
         jobs = [(arguments.distance_mm, None)]
@@ -1062,8 +1292,13 @@ def main() -> None:
             number_of_points = (
                 4 if source is not None and distance_mm / 1000.0 / properties.length < 0.45 else 2 if source is not None else 0
             )
-        print(f"Training d={distance_mm:g} mm with {number_of_points} internal data points...")
-        result = run_case(distance_mm, properties, source, arguments)
+        config = resolve_case_arguments(arguments, distance_mm, source)
+        print(
+            f"Training d={distance_mm:g} mm with {number_of_points} internal data points, "
+            f"physics_weight={config.physics_weight:g}, closure_weight={config.closure_weight:g}...",
+            flush=True,
+        )
+        result = run_case(distance_mm, properties, source, config)
         results.append(result)
         summary = (
             f"d={distance_mm:g} mm | points={result['training_points']} | "
@@ -1088,6 +1323,8 @@ def main() -> None:
             stream,
             indent=2,
         )
+    if arguments.verify_results:
+        verify_saved_results(arguments.output_dir)
 
 
 if __name__ == "__main__":

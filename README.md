@@ -102,8 +102,8 @@ top-to-bottom as 75, 115, 150, 170, 190, and 210 mm.
 ## Refined physical consistency for d=150 mm
 
 The curated `results/shape_150.csv`, `results/shape_150.png`, and the 150 mm
-entry in `results/summary.json` use this refined run. The identical standalone
-run is retained under `results/refined_150/` for provenance.
+entry in `results/summary.json` use this refined run. The command below saves
+a separate rerun under `results/refined_150/`.
 
 The d=150 mm curve is a sensitive looped branch. With only two interior
 measurements, the default data-weighted objective can fit those points while
@@ -130,9 +130,10 @@ iterations, the same code and training budget gave:
 | Physics + closure weights = 100 | 6.227e-5 | 2.142e-7 | 0.112 mm | 0.999988 |
 
 These weights deliberately prioritize agreement with the governing ODE BVP. The
-normalized two-point data loss increases from `4.104e-4` to `2.929e-3`, so use
-the default weighting instead if matching the sparse photographed points is
-more important than PINN-to-projection consistency.
+normalized two-point data loss increases from `4.104e-4` to `2.929e-3`. To
+restore the original data-prioritized weighting, pass `--physics-weight 1
+--closure-weight 0`; the unified script now selects the refined weights for
+the supplied 150 mm case by default.
 
 ## Corrections relative to the old script
 
@@ -145,3 +146,66 @@ more important than PINN-to-projection consistency.
 ## Limits
 
 The equation assumes a uniform, planar, inextensible strip and point-like supports. The PINN approximates frictionless distributed ground contact through a non-negative pressure and the Signorini condition `p*y=0`; it does not model tangential friction, plastic deformation, or nonuniform paper stiffness. Contact is resolved only at the 160 collocation points, so a large flat contact zone may require more collocation points. If you independently measure Young's modulus, pass `--youngs-modulus-pa <value>`; that is preferable to estimating `E` from sparse image points when material identification is the goal.
+
+## File hợp nhất
+
+`bending_with_distributed_loading.py` là file chạy duy nhất, chứa toàn bộ bộ
+giải và năm biến thể thí nghiệm qua `--experiment-150mm`. File vẫn cần
+`data/` và các thư viện trong `requirements.txt`. Mặc định ghi vào
+`results_unified/`.
+
+```bash
+# Chạy cả sáu khoảng cách với cấu hình đúng theo results/ và kiểm tra kết quả
+python3 bending_with_distributed_loading.py --case all --verify-results
+
+# Chạy riêng một trường hợp; dùng cùng cấu hình như khi chạy --case all
+python3 bending_with_distributed_loading.py --case 150 --verify-results --output-dir results_unified/only_150
+
+# So sánh 5 biến thể ở 150 mm; mỗi biến thể có thư mục riêng
+python3 bending_with_distributed_loading.py --experiment-150mm --output-dir results_unified/experiment_150mm
+
+# Chọn riêng một cấu hình, đối chiếu với dữ liệu đo
+python3 bending_with_distributed_loading.py --case 150 --sampling curvature --data-points 4 --ground off --reference measured --output-dir results_unified/curvature_free
+
+# Cấu hình refined 150 mm, đối chiếu với phép chiếu BVP
+python3 bending_with_distributed_loading.py --case 150 --data-points 2 --physics-weight 100 --closure-weight 100 --output-dir results_unified/refined_150
+```
+
+`--reference bvp` (mặc định) tính sai số với phép chiếu BVP không tiếp xúc;
+`--reference measured` tính sai số với đường đo. Chế độ `--experiment-150mm`
+luôn dùng đường đo, support calibrated và năm tổ hợp uniform/curvature,
+2/4 điểm, ground on/off của thí nghiệm gốc. Các trọng số loss, seed và ngân
+sách huấn luyện dùng chung qua CLI. Bộ chọn curvature bảo đảm đủ số điểm
+nội bộ phân biệt, tránh trùng điểm hoặc chọn đầu mút.
+
+Dùng `--replot-only --output-dir <thư_mục_một_biến_thể>` để vẽ lại từng biến
+thể. Thư mục tổng của thí nghiệm chứa summary của cả năm biến thể.
+
+Mặc định của file hợp nhất tái hiện cấu hình đã lưu trong `results/`:
+
+| Khoảng cách (mm) | Số điểm đo | Data weight | Physics weight | Closure weight |
+|---|---:|---:|---:|---:|
+| 75, 115 | 4 | 10 | 1 | 0 |
+| 150 | 2 | 10 | 100 | 100 |
+| 170, 190, 210 | 2 | 10 | 1 | 0 |
+
+Cả sáu dùng lấy mẫu uniform, ground on, support calibrated, seed `42 + d`,
+20.000 bước Adam, 2.000 vòng L-BFGS và 160 điểm collocation. Các tham số CLI
+được truyền tường minh sẽ ghi đè mặc định. Thí nghiệm `--experiment-150mm`
+giữ trọng số 1/0 ban đầu; các biến thể của thí nghiệm này không phải bộ kết
+quả chuẩn trong `results/`.
+
+`--verify-results` chỉ đọc kết quả chuẩn **sau khi huấn luyện**, so sánh toàn
+bộ CSV (tọa độ, góc và xi) cùng các chỉ số trong summary, ghi
+`verification.json` và báo lỗi nếu sai khác vượt ngưỡng làm tròn số
+(`rtol=1e-7`, `atol=1e-9` cho CSV; `atol=1e-10` cho chỉ số).
+File hợp nhất không lấy đường cong đã lưu làm đầu ra dự đoán. Khi đổi phiên
+bản thư viện hoặc môi trường số, cần chạy lại phép kiểm tra này trước khi
+khẳng định kết quả trùng bộ chuẩn.
+
+Đã chạy lại đầy đủ cả sáu trường hợp ngày 18/09/2026: toàn bộ giá trị CSV
+và chỉ số đã lưu khớp chính xác (chênh lệch bằng 0); sáu PNG riêng và PNG
+tổng hợp cũng trùng từng byte. Chạy riêng 150 mm cho cùng kết quả với
+`--case all`. Báo cáo tại `results_unified/verification.json` ghi môi trường
+đã kiểm chứng: Python 3.9.6, NumPy 2.0.2, PyTorch 2.8.0, SciPy 1.13.1,
+Matplotlib 3.9.4, macOS arm64, CPU 4 threads.
