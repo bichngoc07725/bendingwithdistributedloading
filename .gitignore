@@ -7,5 +7,21 @@ __pycache__/
 # Local tool runtime state, not project source.
 .claude/
 
+# Keep only the curated top-level results/ tree in version control.
+/results_150_refined/
+/results_experiment_150mm/
+/results_interpolated/
+/results_numerical_validation/
+/results_pinned_170/
+/tmp/
+/quantum_pinn_paper_bending/output/
+
+# Auxiliary runs stay local under the single results/ tree.
+/results/experiment_150mm/
+/results/interpolated/
+/results/numerical_validation/
+/results/predictions/
+/results/quantum/
+
 # Unpublished multi-author manuscript draft -- not for public push.
 /paper/

@@ -60,6 +60,57 @@
       "dependsOn": "Install dependencies",
       "dependsOrder": "sequence",
       "problemMatcher": []
+    },
+    {
+      "label": "Run: refine d=150 mm (physics closure)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/bending_with_distributed_loading.py",
+        "--case",
+        "150",
+        "--data-points",
+        "2",
+        "--data-weight",
+        "10",
+        "--physics-weight",
+        "100",
+        "--closure-weight",
+        "100",
+        "--output-dir",
+        "${workspaceFolder}/results/refined_150"
+      ],
+      "dependsOn": "Install dependencies",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Replot: standardize figures in results",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/bending_with_distributed_loading.py",
+        "--replot-only",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ],
+      "dependsOn": "Install dependencies",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "Plot: six measured vs PINN cases",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "${workspaceFolder}/bending_with_distributed_loading.py",
+        "--plot-six-cases",
+        "--output-dir",
+        "${workspaceFolder}/results"
+      ],
+      "dependsOn": "Install dependencies",
+      "dependsOrder": "sequence",
+      "problemMatcher": []
     }
   ]
 }

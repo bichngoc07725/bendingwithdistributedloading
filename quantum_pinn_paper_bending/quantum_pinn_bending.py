@@ -422,7 +422,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--qubits", type=int, default=4)
     parser.add_argument("--circuit-layers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "results")
+    parser.add_argument("--output-dir", type=Path, default=CLASSICAL_ROOT / "results" / "quantum")
     return parser.parse_args()
 
 

@@ -180,7 +180,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--collocation-points", type=int, default=160)
     parser.add_argument("--data-weight", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "results_numerical_validation")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "results" / "numerical_validation")
     return parser.parse_args()
 
 

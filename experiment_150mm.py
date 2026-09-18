@@ -39,7 +39,7 @@ LBFGS_ITERATIONS = 2000
 COLLOCATION_POINTS = 160
 DATA_WEIGHT = 10.0
 SEED = 42
-OUTPUT_DIR = ROOT / "results_experiment_150mm"
+OUTPUT_DIR = ROOT / "results" / "experiment_150mm"
 
 
 class FreeYPaperPINN(PaperPINN):

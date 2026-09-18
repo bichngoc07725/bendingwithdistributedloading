@@ -44,7 +44,7 @@ ADAM_EPOCHS = 20000
 LBFGS_ITERATIONS = 2000
 COLLOCATION_POINTS = 160
 SEED = 42
-OUTPUT_DIR = ROOT / "results_interpolated"
+OUTPUT_DIR = ROOT / "results" / "interpolated"
 
 
 def interp_extrap(query: float, xs: np.ndarray, ys: np.ndarray) -> float:

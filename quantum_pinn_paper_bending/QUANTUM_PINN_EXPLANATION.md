@@ -55,7 +55,8 @@ Mở `quantum-paper-bending-pinn.code-workspace`, tin cậy workspace, rồi ch�
 Tasks: Run Task -> Run QPINN: d=190 mm
 ```
 
-Task tạo `.venv`, cài PennyLane/PyTorch và chạy mô phỏng. Kết quả nằm trong `results/`:
+Task tạo `.venv`, cài PennyLane/PyTorch và chạy mô phỏng. Kết quả nằm trong
+`../results/quantum/` của repository chính:
 
 - `quantum_shape_<d>.png`: so sánh hình dạng;
 - `quantum_shape_<d>.csv`: xi, x, y, phi, phản lực nền;

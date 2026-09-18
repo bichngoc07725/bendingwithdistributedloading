@@ -29,7 +29,7 @@ from reportlab.platypus import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "output" / "pdf" / "giai_thich_qpinn_uon_giay.pdf"
+OUT = ROOT.parent / "results" / "quantum" / "giai_thich_qpinn_uon_giay.pdf"
 FIGURE = ROOT / "docs" / "quantum_pinn_architecture_reference.png"
 CODE = "quantum_pinn_paper_bending/quantum_pinn_bending.py"
 CLASSICAL_CODE = "bending_with_distributed_loading.py"

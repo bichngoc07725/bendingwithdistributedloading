@@ -6,9 +6,12 @@ This project rewrites `bending_with_distributed_loading.py` as an executable PyT
 
 1. Open `paper-bending-pinn.code-workspace` in VS Code and install the suggested **Python** extension if VS Code requests it.
 2. Press `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/Linux), choose **Tasks: Run Task**, then run **Run: calibrate all data (adaptive 2/4 points)**. The task creates `.venv`, installs `requirements.txt`, and runs the validated configuration.
-3. To use the debugger, select either `PINN: calibrate all data (adaptive 2/4 points)` or `PINN: predict d=140 mm (no data)` in **Run and Debug**, then press `F5`.
+3. To use the debugger, select a `PINN: ...` configuration in **Run and Debug**, then press `F5`.
 
 Use **Run: predict d=140 mm (no data)** when only the end distance is known. Change `140` in `.vscode/tasks.json` or `.vscode/launch.json` to predict another distance in mm.
+
+Use **Run: refine d=150 mm (physics closure)** to regenerate the improved
+`results/refined_150/shape_150.png` described below.
 
 ## Physical model
 
@@ -30,11 +33,24 @@ x(0)=0, y(0)=0, x(L)=d, y(L)=0.
 
 The experimental coordinate system also has a rigid ground at `y=0`. The architecture enforces the unilateral constraint `y(s) >= 0` exactly, so a predicted curve cannot penetrate below the ground line.
 
-The loss contains the three dimensionless residuals for the ODE above. Adam brings the network into the solution basin and L-BFGS finishes the BVP solve.
+The loss contains the three dimensionless residuals for the ODE above. An
+optional global closure term also enforces the integrated inextensibility
+conditions
+
+```text
+integral cos(phi) dxi = d/L,  integral sin(phi) dxi = 0.
+```
+
+This prevents a small local kinematic residual from accumulating into a visible
+endpoint drift when the learned tangent field is integrated by the
+contact-free BVP projection. That projection reuses the PINN's fitted
+parameters and omits contact pressure, so it is a consistency diagnostic rather
+than independent ground truth. Adam brings the network into the solution basin
+and L-BFGS finishes the BVP solve.
 
 ## Two support models
 
-`--support pinned` is the predictive, data-free model. It adds the ideal-pin conditions `dphi/ds(0)=dphi/ds(L)=0`, so knowing `d` is enough to predict a single low-energy equilibrium. The program selects this mode automatically when using `--distance-mm`:
+`--support pinned` is the nominal data-free mode. It adds the ideal-pin conditions `dphi/ds(0)=dphi/ds(L)=0`; the current implementation can run from `d` alone, but an accurate branch is not guaranteed. The program selects this mode automatically when using `--distance-mm`:
 
 ```bash
 python3 bending_with_distributed_loading.py --distance-mm 140
@@ -42,7 +58,7 @@ python3 bending_with_distributed_loading.py --distance-mm 140
 
 The supplied photographs are not perfectly symmetric, particularly at 75 and 115 mm. This is expected when a real clamp has friction, finite contact area, or an end moment. It is also consistent with the paper, which fits unknown edge angle/curvature parameters rather than setting pin moments to zero.
 
-`--support calibrated` therefore leaves the end conditions to be identified from the curve. It needs at least two *interior* points; the two endpoint coordinates are never used as training data because they are already exact boundary conditions. This is also the **default** whenever `--case` uses one of the supplied data files. The adaptive default uses 4 points for `d=75/115 mm` (tight loops) and 2 points for the other cases. To force exactly two points in every case, pass `--data-points 2`.
+`--support calibrated` therefore leaves the end conditions to be identified from the curve. It needs at least two *interior* points; the two endpoint coordinates are never used in the data loss because they are already exact boundary conditions. This is also the **default** whenever `--case` uses one of the supplied data files. The current case defaults use 4 points for `d=75/115 mm` and 2 points for the other cases. To force exactly two points in every case, pass `--data-points 2`.
 
 ```bash
 python3 bending_with_distributed_loading.py --case all --output-dir results
@@ -57,26 +73,66 @@ python3 bending_with_distributed_loading.py \
 
 Each run writes `shape_<d>.csv` (`xi`, `x_m`, `y_m`, `phi_rad`), a comparison plot `shape_<d>.png`, and `summary.json` to the output directory.
 
-## Validation using adaptive sparse internal points
+All shape plots use the same 7.2 x 5.2 inch canvas, 170 DPI, physical axis
+limits, ticks, one-to-one data aspect ratio, fonts, legend, and margins. This
+makes the different end-distance cases visually comparable. To restyle plots
+already stored in `results` without retraining the PINN, run the VS Code task
+**Replot: standardize figures in results** or:
 
-The following runs used the supplied data files, the calibrated-end mode, the nonpenetrating-ground constraint `y >= 0`, 160 collocation points, 5,000 Adam steps, and 500 L-BFGS iterations. The tight loops at 75 and 115 mm need four interior points to identify their elastica branch; all other cases use two. RMSE is the Euclidean curve error after sampling both curves at the same normalized arc-length positions.
+```bash
+python3 bending_with_distributed_loading.py \
+  --replot-only --output-dir results
+```
 
-| End distance | Internal training points | RMSE | R² (y) |
-|---:|---:|---:|---:|
-| 75 mm | 4 | 3.27 mm | 0.9983 |
-| 115 mm | 4 | 5.16 mm | 0.9844 |
-| 150 mm | 2 | 6.64 mm | 0.9290 |
-| 170 mm | 2 | 1.19 mm | 0.9993 |
-| 190 mm | 2 | 1.95 mm | 0.9993 |
-| 210 mm | 2 | 1.80 mm | 0.9978 |
+To create the publication figure with all six measured curves (red), PINN
+predictions (blue dashed), and the two or four calibration points, run the VS
+Code task **Plot: six measured vs PINN cases** or:
 
-For comparison, the ideal-pinned model at 170 mm used **zero** curve points and achieved RMSE `8.54 mm`, R²(y) `0.9960`; it captures the global arch but cannot reproduce the photographed asymmetry. Its unconstrained version can also penetrate the ground plane, so it is not suitable for contact configurations. Two calibration points are useful for ordinary cases and four are required for the tight loops; neither should be confused with the data-free physics prediction.
+```bash
+python3 bending_with_distributed_loading.py \
+  --plot-six-cases --output-dir results
+```
+
+This writes both `results/measured_vs_pinn_six_cases.png` and a vector-quality
+`results/measured_vs_pinn_six_cases.pdf`. The panels are ordered left-to-right,
+top-to-bottom as 75, 115, 150, 170, 190, and 210 mm.
+
+## Refined physical consistency for d=150 mm
+
+The d=150 mm curve is a sensitive looped branch. With only two interior
+measurements, the default data-weighted objective can fit those points while
+leaving enough local ODE error for the contact-free BVP projection
+to miss the right endpoint. Use stronger local-physics and global-closure terms
+for this case:
+
+```bash
+python3 bending_with_distributed_loading.py \
+  --case 150 \
+  --data-points 2 \
+  --data-weight 10 \
+  --physics-weight 100 \
+  --closure-weight 100 \
+  --output-dir results/refined_150
+```
+
+With seed 42, 160 collocation points, 20,000 Adam steps, and 2,000 L-BFGS
+iterations, the same code and training budget gave:
+
+| d=150 configuration | Physics loss | Closure loss | RMSE to BVP projection | R² (y) |
+|---|---:|---:|---:|---:|
+| Default weights | 5.556e-3 | 0 (disabled) | 4.962 mm | 0.9838 |
+| Physics + closure weights = 100 | 6.227e-5 | 2.142e-7 | 0.112 mm | 0.999988 |
+
+These weights deliberately prioritize agreement with the governing ODE BVP. The
+normalized two-point data loss increases from `4.104e-4` to `2.929e-3`, so use
+the default weighting instead if matching the sparse photographed points is
+more important than PINN-to-projection consistency.
 
 ## Corrections relative to the old script
 
 - Removed Colab-only syntax, Google Drive paths, TensorFlow/pandas dependency, undefined `loss_mse`, and attempts to load a nonexistent model.
 - Replaced per-layer `F`/`Q` values and their arbitrary average with global physical reaction-force parameters.
-- Preserved the PDE while enforcing all four position boundary conditions exactly; the old code rescaled the predicted curve after solving, which breaks the inextensibility/PDE relation.
+- Preserved the elastica ODE while enforcing all four position boundary conditions exactly; the old code rescaled the predicted curve after solving, which breaks the inextensibility/ODE relation.
 - Avoids fitting finite-difference angles, which amplify pixel noise. The network learns the smooth tangent angle and coordinate curve together from the governing equations.
 - Reads both provided CSV and XLSX files without notebook-only dependencies, aligns each photo to its known chord, and samples sparse observations by arc length.
 

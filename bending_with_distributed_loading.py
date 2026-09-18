@@ -44,6 +44,7 @@ from typing import Optional
 # Some managed Python installs have a read-only home folder.  Keep Matplotlib's
 # cache in the system temporary directory instead of printing cache warnings.
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "paper_pinn_matplotlib"))
+os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "paper_pinn_cache"))
 
 import matplotlib
 
@@ -57,6 +58,16 @@ from torch import nn
 
 ROOT = Path(__file__).resolve().parent
 TORCH_DTYPE = torch.float64
+
+# Publication-style geometry shared by every shape plot. Fixed physical axis
+# limits make different end-distance cases directly comparable and prevent
+# Matplotlib's equal-aspect adjustment from producing differently sized axes.
+PLOT_FIGURE_SIZE_INCHES = (7.2, 5.2)
+PLOT_DPI = 170
+PLOT_X_LIMITS_M = (-0.05, 0.225)
+PLOT_Y_LIMITS_M = (-0.01, 0.17)
+PLOT_X_TICKS_M = np.arange(-0.05, 0.201, 0.05)
+PLOT_Y_TICKS_M = np.arange(0.00, 0.161, 0.02)
 
 
 @dataclass(frozen=True)
@@ -378,6 +389,28 @@ def physics_loss(model: PaperPINN, xi: torch.Tensor, gravity_number: float) -> t
     return pde + 10.0 * complementarity + pressure_regularization
 
 
+def geometric_closure_loss(model: PaperPINN, xi: torch.Tensor) -> torch.Tensor:
+    """Enforce the global inextensibility/endpoint integrals from ``theta``.
+
+    The coordinate outputs already satisfy both endpoint positions exactly,
+    while the local residuals encourage ``x'=cos(theta)`` and
+    ``y'=sin(theta)``.  A finite residual can nevertheless accumulate into a
+    noticeable endpoint drift when an independent ODE solver integrates the
+    learned tangent field, especially for the looped d=150 mm branch.  These
+    two integral constraints explicitly remove that global inconsistency:
+
+        integral cos(theta) dxi = d/L,  integral sin(theta) dxi = 0.
+
+    This is a physics constraint, not additional curve supervision.
+    """
+
+    _, _, theta, _ = model(xi)
+    coordinate = xi[:, 0]
+    tangent_x = torch.trapezoid(torch.cos(theta[:, 0]), coordinate)
+    tangent_y = torch.trapezoid(torch.sin(theta[:, 0]), coordinate)
+    return (tangent_x - model.distance_ratio).square() + tangent_y.square()
+
+
 def data_loss(
     model: PaperPINN,
     xi_data: Optional[torch.Tensor],
@@ -399,21 +432,25 @@ def train(
     lbfgs_iterations: int,
     collocation_points: int,
     data_weight: float,
+    physics_weight: float = 1.0,
+    closure_weight: float = 0.0,
 ) -> dict[str, float]:
     xi = torch.linspace(0.0, 1.0, collocation_points, dtype=TORCH_DTYPE).reshape(-1, 1)
     xi.requires_grad_(True)
     xi_data_t = torch.as_tensor(xi_data, dtype=TORCH_DTYPE)
     xy_data_t = torch.as_tensor(xy_data_m / properties.length, dtype=TORCH_DTYPE)
 
-    def objective() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def objective() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         pde = physics_loss(model, xi, properties.gravity_number)
+        closure = geometric_closure_loss(model, xi)
         observations = data_loss(model, xi_data_t, xy_data_t)
-        return pde + data_weight * observations, pde, observations
+        total = physics_weight * pde + closure_weight * closure + data_weight * observations
+        return total, pde, closure, observations
 
     adam = torch.optim.Adam(model.parameters(), lr=1.0e-3)
     for _ in range(adam_epochs):
         adam.zero_grad()
-        total, _, _ = objective()
+        total, _, _, _ = objective()
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
         adam.step()
@@ -428,17 +465,18 @@ def train(
         line_search_fn="strong_wolfe",
     )
 
-    def closure() -> torch.Tensor:
+    def lbfgs_closure() -> torch.Tensor:
         lbfgs.zero_grad()
-        total, _, _ = objective()
+        total, _, _, _ = objective()
         total.backward()
         return total
 
-    lbfgs.step(closure)
-    total, pde, observations = objective()
+    lbfgs.step(lbfgs_closure)
+    total, pde, closure_constraint, observations = objective()
     return {
         "loss": float(total.detach()),
         "physics_loss": float(pde.detach()),
+        "closure_loss": float(closure_constraint.detach()),
         "data_loss": float(observations.detach()),
     }
 
@@ -528,6 +566,67 @@ def evaluate(predicted_xi: np.ndarray, predicted: np.ndarray, measured: np.ndarr
     return {"rmse_m": rmse, "r2_y": r2_y}
 
 
+def plot_shape(
+    output_path: Path,
+    label: str,
+    predicted: np.ndarray,
+    reference: np.ndarray,
+    sparse_xy: np.ndarray,
+    rmse_m: Optional[float] = None,
+    r2_y: Optional[float] = None,
+) -> None:
+    """Render one comparison with the same canvas, scale and visual style."""
+
+    figure, axis = plt.subplots(figsize=PLOT_FIGURE_SIZE_INCHES)
+    axis.plot(
+        reference[:, 0],
+        reference[:, 1],
+        color="tab:red",
+        lw=2.2,
+        label="Numerical PDE solution",
+        zorder=2,
+    )
+    axis.plot(
+        predicted[:, 0],
+        predicted[:, 1],
+        color="tab:blue",
+        lw=2.2,
+        ls="--",
+        label="PINN",
+        zorder=3,
+    )
+    if len(sparse_xy):
+        axis.scatter(
+            sparse_xy[:, 0],
+            sparse_xy[:, 1],
+            color="black",
+            s=28,
+            zorder=4,
+            label=f"{len(sparse_xy)} training points",
+        )
+    title = f"d = {label} mm"
+    if rmse_m is not None:
+        title += f", RMSE = {rmse_m * 1000:.3f} mm"
+    if r2_y is not None:
+        title += f", R² = {r2_y:.4f}"
+    axis.set_title(title, fontsize=15, pad=10)
+    axis.set_xlabel("X (m)", fontsize=12)
+    axis.set_ylabel("Y (m)", fontsize=12)
+    axis.set_xlim(*PLOT_X_LIMITS_M)
+    axis.set_ylim(*PLOT_Y_LIMITS_M)
+    axis.set_xticks(PLOT_X_TICKS_M)
+    axis.set_yticks(PLOT_Y_TICKS_M)
+    axis.tick_params(labelsize=10)
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(alpha=0.3, linewidth=0.8)
+    axis.legend(loc="upper right", fontsize=10, framealpha=0.9)
+    # Fixed margins plus fixed limits/aspect give every output the same axes
+    # rectangle. Do not use bbox_inches="tight", which changes pixel size.
+    figure.subplots_adjust(left=0.12, right=0.97, bottom=0.13, top=0.88)
+    figure.savefig(output_path, dpi=PLOT_DPI, facecolor="white")
+    plt.close(figure)
+
+
 def write_outputs(
     output_dir: Path,
     label: str,
@@ -547,44 +646,215 @@ def write_outputs(
         writer.writerow(("xi", "x_m", "y_m", "phi_rad"))
         writer.writerows(zip(xi, predicted[:, 0], predicted[:, 1], predicted[:, 2]))
 
-    figure, axis = plt.subplots(figsize=(6.2, 5.0))
-    axis.plot(
-        reference[:, 0], reference[:, 1], color="tab:red", lw=2, label="Numerical PDE solution", zorder=2
+    plot_shape(
+        output_dir / f"shape_{label}.png",
+        label,
+        predicted,
+        reference,
+        sparse_xy,
+        rmse_m=rmse_m,
+        r2_y=r2_y,
     )
-    axis.plot(
-        predicted[:, 0], predicted[:, 1], color="tab:blue", lw=2, ls="--", label="PINN", zorder=3
-    )
-    if len(sparse_xy):
-        axis.scatter(
-            sparse_xy[:, 0],
-            sparse_xy[:, 1],
-            color="black",
-            s=28,
-            zorder=4,
-            label=f"{len(sparse_xy)} training points",
+
+
+def replot_saved_outputs(output_dir: Path) -> None:
+    """Rebuild saved PNG files from CSV/summary data without retraining."""
+
+    summary_path = output_dir / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Missing {summary_path}")
+    summary = json.loads(summary_path.read_text())
+    length = float(summary["paper_properties"]["length"])
+    bending_stiffness = float(summary["bending_stiffness_Nm2"])
+    gravity_number = float(summary["gravity_number"])
+    force_scale = length**2 / bending_stiffness
+
+    for result in summary["results"]:
+        distance_mm = float(result["distance_mm"])
+        label = f"{distance_mm:g}"
+        csv_path = output_dir / f"shape_{label}.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Missing {csv_path}")
+        with csv_path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        xi = np.asarray([float(row["xi"]) for row in rows])
+        predicted = np.asarray(
+            [
+                [float(row["x_m"]), float(row["y_m"]), float(row["phi_rad"])]
+                for row in rows
+            ]
         )
-    title = f"d = {label} mm"
-    if rmse_m is not None:
-        title += f", RMSE = {rmse_m * 1000:.3f} mm"
-    if r2_y is not None:
-        title += f", R² = {r2_y:.4f}"
-    axis.set(xlabel="X (m)", ylabel="Y (m)", title=title)
-    axis.grid(alpha=0.3)
-    # Headroom above the curve so the top-right legend box doesn't sit on
-    # top of the data (e.g. an arch whose peak reaches the top-right).
-    # adjustable="box" keeps these exact limits -- unlike axis("equal"),
-    # which autoscales from the plotted data and would undo the padding.
-    x_values = np.concatenate((reference[:, 0], predicted[:, 0]))
-    y_values = np.concatenate((reference[:, 1], predicted[:, 1]))
-    x_span = float(x_values.max() - x_values.min())
-    y_span = float(y_values.max() - y_values.min())
-    axis.set_xlim(x_values.min() - 0.05 * x_span, x_values.max() + 0.05 * x_span)
-    axis.set_ylim(y_values.min() - 0.05 * y_span, y_values.max() + 0.35 * y_span)
-    axis.set_aspect("equal", adjustable="box")
-    axis.legend(loc="upper right")
-    figure.tight_layout()
-    figure.savefig(output_dir / f"shape_{label}.png", dpi=170)
+        reference = numerical_pde_solution(
+            float(result["phi_left_rad"]),
+            float(result["phi_right_rad"]),
+            float(result["F_N"]) * force_scale,
+            float(result["Q_N"]) * force_scale,
+            gravity_number,
+            length,
+            theta_guess=predicted[:, 2],
+            xi_guess=xi,
+            points=len(xi),
+        )
+
+        sparse_xy = np.empty((0, 2))
+        number_of_points = int(result.get("training_points", 0))
+        experiment_key = int(round(distance_mm))
+        if number_of_points and experiment_key in EXPERIMENTS:
+            measured = align_to_boundary(
+                read_xy(ROOT / EXPERIMENTS[experiment_key]), distance_mm / 1000.0
+            )
+            measured_xi = normalized_arclength(measured)
+            observations_xi, _ = select_sparse_observations(
+                measured, measured_xi, number_of_points
+            )
+            reference_xi = np.linspace(0.0, 1.0, len(reference))
+            sparse_xy = np.column_stack(
+                (
+                    np.interp(observations_xi[:, 0], reference_xi, reference[:, 0]),
+                    np.interp(observations_xi[:, 0], reference_xi, reference[:, 1]),
+                )
+            )
+
+        plot_shape(
+            output_dir / f"shape_{label}.png",
+            label,
+            predicted,
+            reference,
+            sparse_xy,
+            rmse_m=result.get("rmse_m"),
+            r2_y=result.get("r2_y"),
+        )
+        print(f"Replotted {output_dir / f'shape_{label}.png'}")
+
+
+def plot_six_case_comparison(output_dir: Path) -> None:
+    """Create the 2x3 measured-vs-PINN figure used by the paper caption."""
+
+    summary_path = output_dir / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Missing {summary_path}")
+    summary = json.loads(summary_path.read_text())
+    by_distance = {
+        int(round(float(result["distance_mm"]))): result
+        for result in summary["results"]
+    }
+    distances = tuple(EXPERIMENTS)
+    missing = [distance for distance in distances if distance not in by_distance]
+    if missing:
+        raise ValueError(f"{summary_path} is missing cases: {missing}")
+
+    figure, axes = plt.subplots(
+        2,
+        3,
+        figsize=(13.2, 7.4),
+        sharex=True,
+        sharey=True,
+    )
+    panel_labels = "abcdef"
+    legend_handles = None
+
+    for panel_index, (axis, distance_mm) in enumerate(zip(axes.flat, distances)):
+        label = f"{distance_mm:g}"
+        prediction_path = output_dir / f"shape_{label}.csv"
+        if not prediction_path.exists():
+            raise FileNotFoundError(f"Missing {prediction_path}")
+        with prediction_path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        predicted = np.asarray(
+            [[float(row["x_m"]), float(row["y_m"])] for row in rows]
+        )
+
+        measured = align_to_boundary(
+            read_xy(ROOT / EXPERIMENTS[distance_mm]), distance_mm / 1000.0
+        )
+        measured_xi = normalized_arclength(measured)
+        number_of_points = int(by_distance[distance_mm]["training_points"])
+        _, calibration_xy = select_sparse_observations(
+            measured, measured_xi, number_of_points
+        )
+
+        measured_line = axis.plot(
+            measured[:, 0],
+            measured[:, 1],
+            color="tab:red",
+            lw=1.9,
+            label="Measured",
+            zorder=2,
+        )[0]
+        predicted_line = axis.plot(
+            predicted[:, 0],
+            predicted[:, 1],
+            color="tab:blue",
+            lw=2.1,
+            ls="--",
+            label="PINN",
+            zorder=3,
+        )[0]
+        calibration_markers = axis.scatter(
+            calibration_xy[:, 0],
+            calibration_xy[:, 1],
+            color="black",
+            edgecolor="white",
+            linewidth=0.4,
+            s=30,
+            label="Calibration points",
+            zorder=4,
+        )
+        if legend_handles is None:
+            legend_handles = (
+                measured_line,
+                predicted_line,
+                calibration_markers,
+            )
+
+        axis.set_title(f"d = {label} mm", fontsize=13, pad=7)
+        axis.text(
+            0.025,
+            0.955,
+            f"({panel_labels[panel_index]})",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=11,
+            fontweight="bold",
+        )
+        axis.set_xlim(*PLOT_X_LIMITS_M)
+        axis.set_ylim(*PLOT_Y_LIMITS_M)
+        axis.set_xticks(PLOT_X_TICKS_M)
+        axis.set_yticks(PLOT_Y_TICKS_M)
+        axis.set_aspect("equal", adjustable="box")
+        axis.tick_params(labelsize=9)
+        axis.grid(alpha=0.28, linewidth=0.7)
+
+    figure.legend(
+        legend_handles,
+        ("Measured", "PINN", "Calibration points"),
+        loc="upper center",
+        bbox_to_anchor=(0.52, 0.985),
+        ncol=3,
+        frameon=False,
+        fontsize=11,
+        handlelength=3.0,
+        columnspacing=2.0,
+    )
+    figure.supxlabel("X (m)", fontsize=13, y=0.025)
+    figure.supylabel("Y (m)", fontsize=13, x=0.015)
+    figure.subplots_adjust(
+        left=0.07,
+        right=0.985,
+        bottom=0.105,
+        top=0.88,
+        wspace=0.14,
+        hspace=0.27,
+    )
+
+    png_path = output_dir / "measured_vs_pinn_six_cases.png"
+    pdf_path = output_dir / "measured_vs_pinn_six_cases.pdf"
+    figure.savefig(png_path, dpi=PLOT_DPI, facecolor="white")
+    figure.savefig(pdf_path, facecolor="white")
     plt.close(figure)
+    print(f"Wrote {png_path}")
+    print(f"Wrote {pdf_path}")
 
 
 def run_case(
@@ -634,6 +904,8 @@ def run_case(
         lbfgs_iterations=arguments.lbfgs_iterations,
         collocation_points=arguments.collocation_points,
         data_weight=arguments.data_weight if len(observations_xi) else 0.0,
+        physics_weight=arguments.physics_weight,
+        closure_weight=arguments.closure_weight,
     )
     xi, predicted = prediction(model, properties)
     label = f"{distance_mm:g}"
@@ -661,6 +933,9 @@ def run_case(
         "phi_left_rad": theta_left,
         "phi_right_rad": theta_right,
         "support": support,
+        "data_weight": arguments.data_weight if len(observations_xi) else 0.0,
+        "physics_weight": arguments.physics_weight,
+        "closure_weight": arguments.closure_weight,
         "min_y_m": float(predicted[:, 1].min()),
         **losses,
     }
@@ -704,6 +979,18 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--data-weight", type=float, default=10.0, help="Weight of normalized sparse-data MSE.")
     parser.add_argument(
+        "--physics-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the local ODE/kinematic/contact residual (default: 1).",
+    )
+    parser.add_argument(
+        "--closure-weight",
+        type=float,
+        default=0.0,
+        help="Weight of global tangent-integral endpoint closure (default: 0).",
+    )
+    parser.add_argument(
         "--support",
         choices=("auto", "pinned", "calibrated"),
         default="auto",
@@ -714,6 +1001,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--collocation-points", type=int, default=160)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "results")
+    parser.add_argument(
+        "--replot-only",
+        action="store_true",
+        help="Regenerate standardized PNGs from output-dir CSV/summary files without retraining.",
+    )
+    parser.add_argument(
+        "--plot-six-cases",
+        action="store_true",
+        help="Create a 2x3 measured-vs-PINN comparison from saved results without retraining.",
+    )
     parser.add_argument("--length-mm", type=float, default=297.0)
     parser.add_argument("--youngs-modulus-pa", type=float, help="Optional measured E; overrides Eq. (8).")
     return parser.parse_args()
@@ -721,10 +1018,22 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
+    if arguments.replot_only and arguments.plot_six_cases:
+        raise ValueError("Use either --replot-only or --plot-six-cases, not both.")
+    if arguments.plot_six_cases:
+        plot_six_case_comparison(arguments.output_dir)
+        return
+    if arguments.replot_only:
+        replot_saved_outputs(arguments.output_dir)
+        return
     if arguments.distance_mm is not None and arguments.case != "all":
         raise ValueError("Use either --distance-mm or --case, not both.")
     if arguments.data_weight < 0.0:
         raise ValueError("data_weight must be non-negative")
+    if arguments.physics_weight < 0.0:
+        raise ValueError("physics_weight must be non-negative")
+    if arguments.closure_weight < 0.0:
+        raise ValueError("closure_weight must be non-negative")
 
     np.random.seed(arguments.seed)
     torch.manual_seed(arguments.seed)
@@ -758,7 +1067,8 @@ def main() -> None:
         results.append(result)
         summary = (
             f"d={distance_mm:g} mm | points={result['training_points']} | "
-            f"physics={result['physics_loss']:.3e} | F={result['F_N']:.5f} N | Q={result['Q_N']:.5f} N"
+            f"physics={result['physics_loss']:.3e} | closure={result['closure_loss']:.3e} | "
+            f"F={result['F_N']:.5f} N | Q={result['Q_N']:.5f} N"
         )
         if "rmse_m" in result:
             summary += f" | RMSE={result['rmse_m'] * 1000:.2f} mm | R2_y={result['r2_y']:.4f}"
