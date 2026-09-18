@@ -99,6 +99,10 @@ top-to-bottom as 75, 115, 150, 170, 190, and 210 mm.
 
 ## Refined physical consistency for d=150 mm
 
+The curated `results/shape_150.csv`, `results/shape_150.png`, and the 150 mm
+entry in `results/summary.json` use this refined run. The identical standalone
+run is retained under `results/refined_150/` for provenance.
+
 The d=150 mm curve is a sensitive looped branch. With only two interior
 measurements, the default data-weighted objective can fit those points while
 leaving enough local ODE error for the contact-free BVP projection
